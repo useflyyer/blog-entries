@@ -1,0 +1,167 @@
+---
+title: 'Integrate BTCPay Server in your website for Bitcoin and Lightning payments ⚡️'
+date: 2021-10-16
+draft: false
+excerpt: "Guide to integrate bitcoin and lightning payments with BTCPay server and AWS EC2."
+minutes: 14
+authors:
+  - fnmendez
+tags:
+  - Integration Guides
+  - Bitcoin
+image: /img/blogposts/cover7.gif
+imageCredits: Image from Michael Saylor on Twitter
+imageCreditsURL: https://twitter.com/saylor/status/1447565813922291716
+---
+
+Looking to learn how to integrate Bitcoin and Lightning payments in your website to sell products or just accept donations? This is the right place for you.
+
+I'll walk you through the open source project [BTCPay server](https://www.btcpayserver.org), Lightning protocol requirements, identifying the paying customer, solving inbound liquidity issues, withdrawing funds and configuring an AWS EC2 instance for this.
+
+Your bitcoin checkout will be all set after this. 🛒⚡
+
+---
+
+As I run my own [Umbrel node](https://getumbrel.com) and BTCPay server is included in the app store I thought I could do it self-hosted but no, would have to get a static IP address or use a dynamic DNS and would be exposing my IP address, I concluded. 
+
+So I found [this guide](https://wiki.ion.radar.tech/tutorials/nodes/btcpay-+-aws-ec2) to deploy BTCPay server in an instance of AWS EC2, and did a few more important steps I will explain. You will be able to use your own node or the internal node, and use a watch-only wallet or manage a hot wallet in the server.
+
+You can see the **final result in [the following video]((https://www.youtube.com/watch?v=APwpjS65CAY))**.
+
+[![Flyyer accepts Lightning payments](/img/blogposts/bitcoin-payments/video-preview.jpg)](https://www.youtube.com/watch?v=APwpjS65CAY)
+
+## Install BTCPay server in an AWS EC2 instance
+
+Follow the steps in [this guide](https://wiki.ion.radar.tech/tutorials/nodes/btcpay-+-aws-ec2) **but read this first**:
+
+#### At step 4 instead of 250 GB I would pick 500 to 600 GB for storage
+
+The guide suggests 250 GB but was written 2 years ago. A full Bitcoin node today takes 420 GB. You can enable pruning to use less storage (explained below at BTCPay setup).
+
+#### At step 6 enable ports for your bitcoin and lightning implementations
+
+When configuring the Security group step make sure to enable the ports your bitcoin and lightning implementations require (you can change it later in your instance at the Security tab clicking the security group name).
+
+**You need port 9735 open for opening Lightning channels with the internal BTCPay lightning node**, so add them at your Security group. I couldn't open a channel with my own node without this later on.
+
+![Security group for your AWS EC2 instance](/img/blogposts/bitcoin-payments/ec2-ports.png)
+
+#### Before BTCPay setup, set lightning alias and enable more memory for faster sync
+
+Before installing BTCPay, you may want to include some [more environment variables](https://docs.btcpayserver.org/Docker/#generated-docker-compose). As a t2-medium instance has 4 GB RAM, I suggest you allow more memory usage for faster sync.
+
+```
+export BTCPAY_HOST="your-btcpay.hostname.com"
+export NBITCOIN_NETWORK="mainnet"
+export BTCPAYGEN_CRYPTO1="btc"
+export BTCPAYGEN_REVERSEPROXY="nginx"
+export BTCPAYGEN_LIGHTNING="lnd"
+# It's like your lightning node's name, it will be visible in 1ml.com
+export LIGHTNING_ALIAS="your-lightning-node-alias"
+# Allow more memory usage for faster sync
+export BTCPAYGEN_ADDITIONAL_FRAGMENTS="opt-more-memory"
+# For also pruning to use less storage (if you really can't pay for a 550 GB instance):
+# export BTCPAYGEN_ADDITIONAL_FRAGMENTS="opt-more-memory;opt-save-storage"
+. ./btcpay-setup.sh -i
+```
+
+## Create a store, a payment button, and your subscriptions controller if needed
+
+Synchronizing will take 3 to 5 days, so you shouldn't be able to create a wallet or invoices yet.
+
+At your BTCPay server, create a store and enable Bitcoin and/or Lightning payments (or later when synced). Allow anyone to create invoices ✅
+
+#### Create a webhook to do your stuff at your backend
+
+In the store, go to Webhooks and create one for all events ("Send me everything"). This will send a POST request to the endpoint you specify, and will send something like this:
+
+```
+{
+  "deliveryId": "OWwdmF781Emmfdad123aFHFSP",
+  "webhookId": "mGke78dQDokwdPODHFSP",
+  "originalDeliveryId": "OWwdmF781Emmfdad123aFHFSP",
+  "isRedelivery": false,
+  "type": "InvoiceCreated",
+  "timestamp": 1633257337,
+  "storeId": "HFSP13r8AEMdfleHFSP2839meHFSP",
+  "invoiceId": "61ykPR4mkGwsTK1pyHFSP"
+}
+```
+
+The `type` is `InvoiceSettled` means Bitcoin achieved the amount of confirmations you defined or the Lightning payment just worked (it's lightning fast), so you can upgrade your customer's plan or whatever.
+
+**To know who paid**, you will need to get the invoice from your BTCPay server database with its already available API.
+
+#### Authenticating to your BTCPay API
+
+IMO this is not clear in [the API docs](https://docs.btcpayserver.org/API/Greenfield/v1/#operation/Invoices_GetInvoices). I found the how-to in the libraries they have. Check here for [Node.js](https://github.com/btcpayserver/node-btcpay) or [Python](https://github.com/btcpayserver/btcpay-python). For more information read the [custom API integration docs](https://docs.btcpayserver.org/CustomIntegration/#using-the-btcpay-api-for-custom-integration).
+
+With this, you'll get a private key and a merchant id to send authenticated requests to your BTCPay server API, and get the invoices with the customer information you asked or you provided in the background when creating the invoice (more of this below at the payment button).
+
+You can test this webhook at your store under Webhooks.
+
+#### Create the payment button
+
+In your store, go to Pay button. Input the details for one of your payment/donation options to use it as a template and make it flexible later on (disabling the modal option makes it easier).
+
+You'll get something like this (I added some more fields):
+
+```
+<form method="POST" action="https://your-btcpay.hostname.com/api/v1/invoices">
+  <input type="hidden" name="storeId" value="AbCa13904rHFSP123" />
+  <input type="hidden" name="orderId" value="your-order-id" />
+  <input type="hidden" name="checkoutDesc" value="Hobby Plan" />
+  <input type="hidden" name="itemDesc" value="Hobby Plan" />
+  <input type="hidden" name="redirectURL" value="https://your.store.com/billing-page" />
+  <input type="hidden" name="price" value="12" />
+  <input type="hidden" name="currency" value="USD" />
+  <button type="submit">Pay with Bitcoin ⚡</button>
+</form>
+```
+
+The [documentation for creating invoices](https://docs.btcpayserver.org/API/Greenfield/v1/#operation/Invoices_CreateInvoice) seems inconsistent. Check the real [Invoice type here](https://github.com/btcpayserver/node-btcpay/blob/master/src/models/invoice.ts). Information about the customer (email for example), will be added at the modal or checkout page that BTCPay already built for us and will be available in the invoice object.
+
+## Getting inbound liquidity to receive Lightning payments ⚡
+
+`Payment failed. Are you sure the receiver has enough inbound liquidity?`
+
+When using the internal node you will need to open channels with it, because you don't have any yet. This channels will need to have fund on their side, i.e. the external nodes need to open the channel with your internal BTCPay lightning node (or you can open it and send a payment 😂).
+
+To solve this, go to your store, and under Lightning click Public node info so you can share it with people so they open channels with you and then get inbound liquidity.
+
+![Get Lightning public node information in BTCPay server](/img/blogposts/bitcoin-payments/public-node-info.png)
+
+It's a very good idea to connect with your own lightning node if you already have inbound liquidity there. Steps for opening a lightning channel are below.
+
+You can also send funds to your BTCPay lightning node and open channels with popular services ([find them here](https://1ml.com/)), you'll be getting inbound liquidity while routing payments.
+
+## Manage your Lightning node: send lightning payments and everything
+
+After making your first successful payment test... "Ok now how do I get my magic internet money back" 🤔
+
+Relax, BTCPay did it again. At your BTCPay server, go to Server settings > Services, and click "See information" next to **Ride The Lightning server** then browser version (it's already hosted in your server 😉). RTL enables us to do everything we need with our Lightning node, there is a lot to learn about it.
+
+To withdraw funds (recommended from time to time if you're using the internal node hot wallet), just create a new invoice from your phone lightning wallet (or whatever) and send the payment from here. This will also let you recover the inbound liquidity you had before because you'll be moving the funds from your side of the channels to the external sides.
+
+To manage your lightning node with an external app, read [here](https://docs.btcpayserver.org/FAQ/Wallet/#is-there-a-mobile-app-for-btcpay-server-wallet).
+
+![Ride The Lightning hosted in your BTCPay server](/img/blogposts/bitcoin-payments/ride-the-lightning.png)
+
+## Open a lightning channel with Flyyer.io
+
+1. Go to Ride The Lightning
+2. Lightning
+3. Peers/Channels
+4. Peers
+5. Add Peer
+6. Paste our pubkey@host:port `02048512e045cf39a77cf78d31fa3517f117dfd300f5bc4b3a2c9ee0a166a742a9@6sjpzuin54cupb5bhyuxgtbrcoj3lsa6iddfm5jxlhvygr34dqrlhqqd.onion:9735`
+7. Click Add peer
+8. Set the channel amount (from 150k to 2M sats is nice)
+9. Advanced options:
+    - Private channel ❌
+    - Fee: 4-20 sats/vB ([estimate confirmation time](https://mempool.space/))
+    - Spend Unconfirmed Output ✅
+11. Open channel
+
+**Thank you very much 🤝**
+
